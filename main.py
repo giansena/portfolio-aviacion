@@ -54,8 +54,9 @@ def main():
 
     folder_path = f"raw/hourly_tracking/{year}/{month}/{day}/{hour}"
     
-
-    upload_to_adls(all_flights, folder_path, "flights_snapshot.json")
+    file_name = f"flights_{now.strftime('%H%M%S')}.json"
+    
+    upload_to_adls(all_flights, folder_path, file_name)
 
 if __name__ == "__main__":
     main()
