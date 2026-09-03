@@ -19,7 +19,7 @@ jobs:
 
       - name: Instalar dependencias
         run: |
-          pip install requests azure-storage-file-datalake
+          pip install requests azure-storage-file-datalake python-dotenv
 
       - name: Ejecutar script de extracción
         env:
