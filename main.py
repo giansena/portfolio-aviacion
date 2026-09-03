@@ -25,45 +25,75 @@ ORIGINS = [
     {"iata": "USH", "name": "Malvinas Argentinas", "airline": "Aerolineas Argentinas"}
 ]
 
-def generate_mock_flights(airport_code, now_local):
-    """Genera un volumen alto de vuelos de llegada simulando la estructura de Aviationstack,
-       evolucionando sus estados (CDC) según la hora del día."""
-    flights = []
-    random.seed(now_local.hour + now_local.day)
+def generate_consistent_flights(airport_code, target_date_str, current_local_hour):
+    """
+    Genera la grilla de vuelos para un día objetivo de forma consistente.
+    Usa la fecha como semilla para que los vuelos sean siempre los mismos,
+    pero evalúa la hora actual para actualizar sus estados y demoras de forma realista.
+    """
+    # Semilla fija basada en la fecha (ej: "2026-09-04-EZE") para mantener la misma flota todo el día
+    seed_string = f"{target_date_str}-{airport_code}"
+    random.seed(seed_string)
     
-    num_flights = 45
+    flights = []
+    num_flights = 40  # Volumen robusto para procesar en Databricks
     
     for i in range(1, num_flights + 1):
         origin = random.choice(ORIGINS)
-        flight_num = f"{random.randint(100, 999)} "
         
-        flight_hour = (i * 2) % 24
-        if flight_hour < now_local.hour:
-            status = random.choices(["landed", "cancelled"], weights=[90, 10])[0]
-        elif flight_hour == now_local.hour:
-            status = random.choices(["active", "delayed"], weights=[75, 25])[0]
-        else:
+        # Asignamos una hora de llegada fija a cada vuelo distribuida en el día (00 a 23 hs)
+        scheduled_hour = (i * 3) % 24
+        scheduled_minute = (i * 17) % 60
+        
+        # Armar strings de horario ISO
+        sched_time_str = f"{target_date_str}T{scheduled_hour:02d}:{scheduled_minute:02d}:00+00:00"
+        
+        # Lógica de CDC (Evolución de estado según el tiempo transcurrido)
+        estimated_time_str = sched_time_str
+        actual_time_str = None
+        
+        if current_local_hour < scheduled_hour:
+            # El vuelo todavía no pasó: su estado es programado
             status = "scheduled"
+            
+        elif current_local_hour == scheduled_hour:
+            # El vuelo está en la franja horaria actual: puede estar activo o sufrir una demora
+            status = random.choices(["active", "delayed"], weights=[70, 30])[0]
+            if status == "delayed":
+                # Si se demora, sumamos 45 minutos al estimado
+                estimated_time_str = f"{target_date_str}T{scheduled_hour:02d}:{(scheduled_minute+45)%60:02d}:00+00:00"
+        else:
+            # El vuelo ya pasó de su hora programada: ya aterrizó o fue cancelado
+            status = random.choices(["landed", "cancelled"], weights=[92, 8])[0]
+            if status == "landed":
+                actual_time_str = sched_time_str
 
         flight_record = {
-            "flight_date": now_local.strftime("%Y-%m-%d"),
+            "flight_date": target_date_str,
             "flight_status": status,
             "departure": {
                 "airport": origin["name"],
                 "timezone": "America/Sao_Paulo",
-                "iata": origin["iata"]
+                "iata": origin["iata"],
+                "scheduled": f"{target_date_str}T{(scheduled_hour-2)%24:02d}:{scheduled_minute:02d}:00+00:00",
+                "estimated": f"{target_date_str}T{(scheduled_hour-2)%24:02d}:{scheduled_minute:02d}:00+00:00"
             },
             "arrival": {
                 "airport": "Ministro Pistarini" if airport_code == "EZE" else "Aeroparque Jorge Newbery",
                 "timezone": "America/Argentina/Buenos_Aires",
-                "iata": airport_code
+                "iata": airport_code,
+                "scheduled": sched_time_str,
+                "estimated": estimated_time_str,
+                "actual": actual_time_str,
+                "terminal": "A" if airport_code == "EZE" else "B",
+                "gate": str(random.randint(1, 15))
             },
             "airline": {
                 "name": origin["airline"]
             },
             "flight": {
-                "number": str(random.randint(1000, 9999)),
-                "iata": f"AR{random.randint(1000, 9999)}"
+                "number": str(1000 + i),
+                "iata": f"AR{2000 + i}"
             }
         }
         flights.append(flight_record)
@@ -87,17 +117,33 @@ def upload_to_adls(data, folder_path, file_name):
 def main():
     tz = ZoneInfo("America/Argentina/Cordoba")
     now_local = datetime.now(tz)
+    current_hour = now_local.hour
     
-    flights_eze = generate_mock_flights("EZE", now_local)
-    flights_aep = generate_mock_flights("AEP", now_local)
+    # ---------------------------------------------------------
+    # REGLA DE NEGOCIO SOLICITADA:
+    # A partir de las 18:00 hs, empezamos a capturar el cronograma 
+    # oficial del DÍA SIGUIENTE. Antes de las 00:00 y durante todo 
+    # el día siguiente, hacemos el tracking de ese mismo día.
+    # ---------------------------------------------------------
+    if current_hour >= 18:
+        target_date_obj = now_local + timedelta(days=1)
+    else:
+        target_date_obj = now_local
+        
+    target_date_str = target_date_obj.strftime("%Y-%m-%d")
+    
+    # Generar la grilla consistente evaluando la hora actual del ciclo
+    flights_eze = generate_consistent_flights("EZE", target_date_str, current_hour)
+    flights_aep = generate_consistent_flights("AEP", target_date_str, current_hour)
     all_flights = flights_eze + flights_aep
     
-    year = now_local.strftime("%Y")
-    month = now_local.strftime("%m")
-    day = now_local.strftime("%d")
-    hour = now_local.strftime("%H") 
+    # Particionamiento estructurado en la carpeta del día objetivo y hora de corrida
+    year = target_date_obj.strftime("%Y")
+    month = target_date_obj.strftime("%m")
+    day = target_date_obj.strftime("%d")
+    hour_str = now_local.strftime("%H") 
     
-    folder_path = f"raw/hourly_tracking/{year}/{month}/{day}/{hour}"
+    folder_path = f"raw/hourly_tracking/{year}/{month}/{day}/{hour_str}"
     file_name = f"flights_{now_local.strftime('%H%M%S')}.json"
     
     upload_to_adls(all_flights, folder_path, file_name)
